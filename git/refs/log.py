@@ -5,12 +5,9 @@ from git.util import (
 						LockFile,
 						assure_directory_exists,
 						to_native_path,
-					)
-
-from gitdb.util import (
 						bin_to_hex,
 						join,
-						file_contents_ro_filepath,
+						file_contents_ro_filepath
 					)
 
 from git.objects.util import (
@@ -129,7 +126,13 @@ class RefLog(list, Serializable):
 		# END handle filepath
 	
 	def _read_from_file(self):
-		fmap = file_contents_ro_filepath(self._path, stream=False, allow_mmap=True)
+		try:
+			fmap = file_contents_ro_filepath(self._path, stream=True, allow_mmap=True)
+		except OSError:
+			# it is possible and allowed that the file doesn't exist !
+			return
+		#END handle invalid log
+		
 		try:
 			self._deserialize(fmap)
 		finally:

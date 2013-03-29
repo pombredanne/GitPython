@@ -120,11 +120,12 @@ class GitConfigParser(cp.RawConfigParser, object):
 	# They must be compatible to the LockFile interface.
 	# A suitable alternative would be the BlockingLockFile
 	t_lock = LockFile
+	re_comment = re.compile('^\s*[#;]')
 	
 	#} END configuration 
 	
 	OPTCRE = re.compile(
-		r'\s?(?P<option>[^:=\s][^:=]*)'		  # very permissive, incuding leading whitespace
+		r'\s*(?P<option>[^:=\s][^:=]*)'		  # very permissive, incuding leading whitespace
 		r'\s*(?P<vi>[:=])\s*'				  # any number of space/tab,
 											  # followed by separator
 											  # (either : or =), followed
@@ -211,16 +212,16 @@ class GitConfigParser(cp.RawConfigParser, object):
 				break
 			lineno = lineno + 1
 			# comment or blank line?
-			if line.strip() == '' or line[0] in '#;':
+			if line.strip() == '' or self.re_comment.match(line):
 				continue
 			if line.split(None, 1)[0].lower() == 'rem' and line[0] in "rR":
 				# no leading whitespace
 				continue
 			else:
 				# is it a section header?
-				mo = self.SECTCRE.match(line)
+				mo = self.SECTCRE.match(line.strip())
 				if mo:
-					sectname = mo.group('header')
+					sectname = mo.group('header').strip()
 					if sectname in self._sections:
 						cursect = self._sections[sectname]
 					elif sectname == cp.DEFAULTSECT:
@@ -244,8 +245,28 @@ class GitConfigParser(cp.RawConfigParser, object):
 							if pos != -1 and optval[pos-1].isspace():
 								optval = optval[:pos]
 						optval = optval.strip()
-						if optval == '""':
-							optval = ''
+						
+						# Remove paired unescaped-quotes
+						unquoted_optval = ''
+						escaped = False
+						in_quote = False
+						for c in optval:
+							if not escaped and c == '"':
+								in_quote = not in_quote
+							else:
+								escaped = (c == '\\') and not escaped
+								unquoted_optval += c
+						
+						if in_quote:
+							if not e:
+								e = cp.ParsingError(fpname)
+							e.append(lineno, repr(line))
+						
+						optval = unquoted_optval
+						
+						optval = optval.replace('\\\\', '\\') # Unescape backslashes
+						optval = optval.replace(r'\"', '"') # Unescape quotes
+						
 						optname = self.optionxform(optname.rstrip())
 						cursect[optname] = optval
 					else:
@@ -302,7 +323,11 @@ class GitConfigParser(cp.RawConfigParser, object):
 			fp.write("[%s]\n" % name)
 			for (key, value) in section_dict.items():
 				if key != "__name__":
-					fp.write("\t%s = %s\n" % (key, str(value).replace('\n', '\n\t')))
+					value = str(value)
+					value = value.replace('\\', '\\\\') # Escape backslashes
+					value = value.replace('"', r'\"') # Escape quotes
+					value = value.replace('\n', '\n\t')
+					fp.write("\t%s = %s\n" % (key, value))
 				# END if key is not __name__
 		# END section writing 
 		
@@ -332,6 +357,10 @@ class GitConfigParser(cp.RawConfigParser, object):
 			close_fp = True
 		else:
 			fp.seek(0)
+			# make sure we do not overwrite into an existing file
+			if hasattr(fp, 'truncate'):
+				fp.truncate()
+			#END 
 		# END handle stream or file
 		
 		# WRITE DATA

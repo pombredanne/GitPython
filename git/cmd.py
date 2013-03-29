@@ -5,7 +5,10 @@
 # the BSD License: http://www.opensource.org/licenses/bsd-license.php
 
 import os, sys
-from util import *
+from util import (
+					LazyMixin, 
+					stream_copy
+				)
 from exc import GitCommandError
 
 from subprocess import (
@@ -14,19 +17,17 @@ from subprocess import (
 							PIPE
 						)
 
-# Enables debugging of GitPython's git commands
-GIT_PYTHON_TRACE = os.environ.get("GIT_PYTHON_TRACE", False)
-
 execute_kwargs = ('istream', 'with_keep_cwd', 'with_extended_output',
 				  'with_exceptions', 'as_process', 
-				  'output_stream' )
+				  'output_stream', 'output_strip' )
 
 __all__ = ('Git', )
 
 def dashify(string):
 	return string.replace('_', '-')
 
-class Git(object):
+
+class Git(LazyMixin):
 	"""
 	The Git class manages communication with the Git binary.
 	
@@ -41,11 +42,22 @@ class Git(object):
 		of the command to stdout.
 		Set its value to 'full' to see details about the returned values.
 	"""
-	__slots__ = ("_working_dir", "cat_file_all", "cat_file_header")
+	__slots__ = ("_working_dir", "cat_file_all", "cat_file_header", "_version_info")
 	
 	# CONFIGURATION
 	# The size in bytes read from stdout when copying git's output to another stream
 	max_chunk_size = 1024*64
+	
+	git_exec_name = "git"			# default that should work on linux and windows
+	git_exec_name_win = "git.cmd"	# alternate command name, windows only
+	
+	# Enables debugging of GitPython's git commands
+	GIT_PYTHON_TRACE = os.environ.get("GIT_PYTHON_TRACE", False)
+	
+	# Provide the full path to the git executable. Otherwise it assumes git is in the path
+	_git_exec_env_var = "GIT_PYTHON_GIT_EXECUTABLE"
+	GIT_PYTHON_GIT_EXECUTABLE = os.environ.get(_git_exec_env_var, git_exec_name)
+	
 	
 	class AutoInterrupt(object):
 		"""Kill/Interrupt the stored process instance once this instance goes out of scope. It is 
@@ -61,6 +73,9 @@ class Git(object):
 			self.args = args
 			
 		def __del__(self):
+			self.proc.stdout.close()
+			self.proc.stderr.close()
+
 			# did the process finish already so we have a return code ?
 			if self.proc.poll() is not None:
 				return
@@ -72,6 +87,8 @@ class Git(object):
 			# try to kill it
 			try:
 				os.kill(self.proc.pid, 2)	# interrupt signal
+			except OSError:
+			    pass # ignore error when process already died
 			except AttributeError:
 				# try windows 
 				# for some reason, providing None for stdout/stderr still prints something. This is why 
@@ -88,6 +105,8 @@ class Git(object):
 			
 			:raise GitCommandError: if the return status is not 0"""
 			status = self.proc.wait()
+			self.proc.stdout.close()
+			self.proc.stderr.close()
 			if status != 0:
 				raise GitCommandError(self.args, status, self.proc.stderr.read())
 			# END status handling 
@@ -214,14 +233,32 @@ class Git(object):
 		"""A convenience method as it allows to call the command as if it was 
 		an object.
 		:return: Callable object that will execute call _call_process with your arguments."""
-		if name[:1] == '_':
-			raise AttributeError(name)
+		if name[0] == '_':
+			return LazyMixin.__getattr__(self, name)
 		return lambda *args, **kwargs: self._call_process(name, *args, **kwargs)
+
+	def _set_cache_(self, attr):
+		if attr == '_version_info':
+			# We only use the first 4 numbers, as everthing else could be strings in fact (on windows)
+			version_numbers = self._call_process('version').split(' ')[2]
+			self._version_info = tuple(int(n) for n in version_numbers.split('.')[:4])
+		else:
+			super(Git, self)._set_cache_(attr)
+		#END handle version info
+			
 
 	@property
 	def working_dir(self):
 		""":return: Git directory we are working on"""
 		return self._working_dir
+		
+	@property
+	def version_info(self):
+		"""
+		:return: tuple(int, int, int, int) tuple with integers representing the major, minor
+			and additional version numbers as parsed from git version.
+			This value is generated on demand and is cached"""
+		return self._version_info
 
 	def execute(self, command,
 				istream=None,
@@ -230,6 +267,7 @@ class Git(object):
 				with_exceptions=True,
 				as_process=False, 
 				output_stream=None, 
+				output_strip=True,
 				**subprocess_kwargs
 				):
 		"""Handles executing the command on the shell and consumes and returns
@@ -272,6 +310,11 @@ class Git(object):
 			This merely is a workaround as data will be copied from the 
 			output pipe to the given output stream directly.
 			
+		:param output_strip:
+			Strip the last line of the output if it is empty (default). Stripping should
+			be disabled whenever it is important that the output is not modified in any
+			way. For example when retrieving patch files using git-diff.
+			
 		:param subprocess_kwargs:
 			Keyword arguments to be passed to subprocess.Popen. Please note that 
 			some of the valid kwargs are already set by this method, the ones you 
@@ -290,7 +333,7 @@ class Git(object):
 		:note:
 		   If you add additional keyword arguments to the signature of this method, 
 		   you must update the execute_kwargs tuple housed in this module."""
-		if GIT_PYTHON_TRACE and not GIT_PYTHON_TRACE == 'full':
+		if self.GIT_PYTHON_TRACE and not self.GIT_PYTHON_TRACE == 'full':
 			print ' '.join(command)
 
 		# Allow the user to have the command executed in their working dir.
@@ -300,12 +343,15 @@ class Git(object):
 		  cwd=self._working_dir
 		  
 		# Start the process
+		env = os.environ.copy()
+		env['LANG'] = 'C'
 		proc = Popen(command,
 						cwd=cwd,
 						stdin=istream,
 						stderr=PIPE,
 						stdout=PIPE,
 						close_fds=(os.name=='posix'),# unsupported on linux
+						env=env,
 						**subprocess_kwargs
 						)
 		if as_process:
@@ -319,7 +365,7 @@ class Git(object):
 			if output_stream is None:
 				stdout_value, stderr_value = proc.communicate() 
 				# strip trailing "\n"
-				if stdout_value.endswith("\n"):
+				if stdout_value.endswith("\n") and output_strip:
 					stdout_value = stdout_value[:-1]
 				if stderr_value.endswith("\n"):
 					stderr_value = stderr_value[:-1]
@@ -337,7 +383,7 @@ class Git(object):
 			proc.stdout.close()
 			proc.stderr.close()
 
-		if GIT_PYTHON_TRACE == 'full':
+		if self.GIT_PYTHON_TRACE == 'full':
 			cmdstr = " ".join(command)
 			if stderr_value:
 				print "%s -> %d; stdout: '%s'; stderr: '%s'" % (cmdstr, status, stdout_value, stderr_value)
@@ -423,11 +469,40 @@ class Git(object):
 		
 		ext_args = self.__unpack_args([a for a in args if a is not None])
 		args = opt_args + ext_args
-
-		call = ["git", dashify(method)]
-		call.extend(args)
-
-		return self.execute(call, **_kwargs)
+		
+		def make_call():
+			call = [self.GIT_PYTHON_GIT_EXECUTABLE, dashify(method)]
+			call.extend(args)
+			return call
+		#END utility to recreate call after changes
+		
+		if sys.platform == 'win32':
+			try:
+				try:
+					return self.execute(make_call(), **_kwargs)
+				except WindowsError:
+					# did we switch to git.cmd already, or was it changed from default ? permanently fail
+					if self.GIT_PYTHON_GIT_EXECUTABLE != self.git_exec_name:
+						raise
+					#END handle overridden variable
+					type(self).GIT_PYTHON_GIT_EXECUTABLE = self.git_exec_name_win
+					call = [self.GIT_PYTHON_GIT_EXECUTABLE] + list(args)
+					
+					try:
+						return self.execute(make_call(), **_kwargs)
+					finally:
+						import warnings
+						msg = "WARNING: Automatically switched to use git.cmd as git executable, which reduces performance by ~70%."
+						msg += "Its recommended to put git.exe into the PATH or to set the %s environment variable to the executable's location" % self._git_exec_env_var 
+						warnings.warn(msg)
+					#END print of warning
+				#END catch first failure
+			except WindowsError:
+				raise WindowsError("The system cannot find or execute the file at %r" % self.GIT_PYTHON_GIT_EXECUTABLE)
+			#END provide better error message
+		else:
+			return self.execute(make_call(), **_kwargs)
+		#END handle windows default installation
 		
 	def _parse_object_header(self, header_line):
 		"""

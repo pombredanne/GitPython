@@ -4,8 +4,36 @@ Changelog
 
 NEXT
 ====
-* Blob Type
- * Added mode constants to ease the manual creation of blobs
+* ### Class Renames ###
+
+ * Renamed **GitCmdObjectDB** to **CmdGitDB** (analogue to **PureCmdDB**)
+ 
+* ### Interface Changes ###
+
+ * **SymbolicReference**
+ 
+  * object_binsha property added
+  
+ * **Blob** Type
+ 
+  * Added mode constants to ease the manual creation of blobs
+  
+ * **Repo** (i.e. **HighLevelRepository**) now supports a progress instance to be provided for its ``clone()`` and ``clone_from`` methods.
+  
+* ### Module Changes ###
+
+ * Removed rev_parse function from git.repo.fun - the respective functionality is available only through the repository's rev_parse method, which might in turn translate to any implementation.
+ 
+* ### Git Cmd ###
+
+ * Added ``version_info`` property to git command, returning a tuple of version numbers.
+ * Added GIT_PYTHON_GIT_EXECUTABLE environment variable, which can be used to set the desired git executable to be used. despite of what would be found in the path.
+ * GIT_PYTHON_TRACE is now set on class level of the Git type, previously it was a module level global variable.
+ * GIT_PYTHON_GIT_EXECUTABLE is a class level variable as well.
+ 
+* ### Exceptions ###
+ 
+ * There is a new common base for all exceptions git-python will throw, namely `GitPythonError`.
 
 0.3.1 Beta 2
 ============

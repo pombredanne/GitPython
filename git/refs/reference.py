@@ -1,17 +1,27 @@
-from symbolic import SymbolicReference
 import os
-from git.objects import Object
-from git.util import (
-					LazyMixin, 
-					Iterable, 
-					)
 
-from gitdb.util import (
+from symbolic import SymbolicReference
+from head import HEAD
+from git.util import (
+							LazyMixin, 
+							Iterable,
 							isfile,
 							hex_to_bin
 						)
 
 __all__ = ["Reference"]
+
+#{ Utilities
+def require_remote_ref_path(func):
+	"""A decorator raising a TypeError if we are not a valid remote, based on the path"""
+	def wrapper(self, *args):
+		if not self.path.startswith(self._remote_common_path_default + "/"):
+			raise ValueError("ref path does not point to a remote reference: %s" % path)
+		return func(self, *args)
+	#END wrapper
+	wrapper.__name__ = func.__name__
+	return wrapper
+#}END utilites
 
 
 class Reference(SymbolicReference, LazyMixin, Iterable):
@@ -22,26 +32,30 @@ class Reference(SymbolicReference, LazyMixin, Iterable):
 	_resolve_ref_on_create = True
 	_common_path_default = "refs"
 	
-	def __init__(self, repo, path):
+	def __init__(self, repo, path, check_path = True):
 		"""Initialize this instance
 		:param repo: Our parent repository
 		
 		:param path:
 			Path relative to the .git/ directory pointing to the ref in question, i.e.
-			refs/heads/master"""
-		if not path.startswith(self._common_path_default+'/'):
-			raise ValueError("Cannot instantiate %r from path %s" % ( self.__class__.__name__, path ))
+			refs/heads/master
+		:param check_path: if False, you can provide any path. Otherwise the path must start with the 
+			default path prefix of this type."""
+		if check_path and not path.startswith(self._common_path_default+'/'):
+			raise ValueError("Cannot instantiate %r from path %s" % (self.__class__.__name__, path))
 		super(Reference, self).__init__(repo, path)
 		
 
 	def __str__(self):
 		return self.name
+		
+	#{ Interface
 
 	def set_object(self, object, logmsg = None):
 		"""Special version which checks if the head-log needs an update as well"""
 		oldbinsha = None
+		head = HEAD(self.repo)
 		if logmsg is not None:
-			head = self.repo.head
 			if not head.is_detached and head.ref == self:
 				oldbinsha = self.commit.binsha
 			#END handle commit retrieval
@@ -62,7 +76,7 @@ class Reference(SymbolicReference, LazyMixin, Iterable):
 			# * check with HEAD only which should cover 99% of all usage
 			# * scenarios (even 100% of the default ones).
 			# */
-			self.repo.head.log_append(oldbinsha, logmsg)
+			head.log_append(oldbinsha, logmsg)
 		#END check if the head
 
 	# NOTE: Don't have to overwrite properties as the will only work without a the log
@@ -82,3 +96,30 @@ class Reference(SymbolicReference, LazyMixin, Iterable):
 		"""Equivalent to SymbolicReference.iter_items, but will return non-detached
 		references as well."""
 		return cls._iter_items(repo, common_path)
+		
+	#}END interface
+	
+	
+	#{ Remote Interface
+	
+	@property
+	@require_remote_ref_path
+	def remote_name(self):
+		"""
+		:return:
+			Name of the remote we are a reference of, such as 'origin' for a reference
+			named 'origin/master'"""
+		tokens = self.path.split('/')
+		# /refs/remotes/<remote name>/<branch_name>
+		return tokens[2]
+		
+	@property
+	@require_remote_ref_path
+	def remote_head(self):
+		""":return: Name of the remote head itself, i.e. master.
+		:note: The returned name is usually not qualified enough to uniquely identify
+			a branch"""
+		tokens = self.path.split('/')
+		return '/'.join(tokens[3:])
+	
+	#} END remote interface

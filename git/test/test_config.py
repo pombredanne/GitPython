@@ -4,13 +4,13 @@
 # This module is part of GitPython and is released under
 # the BSD License: http://www.opensource.org/licenses/bsd-license.php
 
-from git.test.lib import *
-from git import *
+from git.test.lib import TestBase, fixture_path
 import StringIO
+from git.config import *
 from copy import copy
 from ConfigParser import NoSectionError
 
-class TestBase(TestCase):
+class TestConfig(TestBase):
     
     def _to_memcache(self, file_path):
         fp = open(file_path, "r")
@@ -30,7 +30,9 @@ class TestBase(TestCase):
             w_config.read()                 # enforce reading
             assert w_config._sections
             w_config.write()                # enforce writing
-            assert file_obj.getvalue() == file_obj_orig.getvalue()
+            
+            # we stripped lines when reading, so the results differ
+            assert file_obj.getvalue() != file_obj_orig.getvalue()
             
             # creating an additional config writer must fail due to exclusive access
             self.failUnlessRaises(IOError, GitConfigParser, file_obj, read_only = False)
@@ -56,10 +58,10 @@ class TestBase(TestCase):
             
             file_obj.seek(0)
             r_config = GitConfigParser(file_obj, read_only=True)
+            #print file_obj.getvalue()
             assert r_config.has_section(sname)
             assert r_config.has_option(sname, oname)
             assert r_config.get(sname, oname) == val
-            
         # END for each filename
         
     def test_base(self):
@@ -99,4 +101,28 @@ class TestBase(TestCase):
         # it raises if there is no default though
         self.failUnlessRaises(NoSectionError, r_config.get_value, "doesnt", "exist")
         
-        
+    def test_values(self):
+        file_obj = self._to_memcache(fixture_path("git_config_values"))
+        w_config = GitConfigParser(file_obj, read_only = False)
+        w_config.write() # enforce writing
+        orig_value = file_obj.getvalue()
+
+        # Reading must unescape backslashes
+        backslash = w_config.get('values', 'backslash')
+        assert backslash == r'some\data'
+
+        # Reading must unescape quotes
+        quote = w_config.get('values', 'quote')
+        assert quote == 'this is a "quoted value"'
+
+        # Reading must remove surrounding quotes
+        quoted = w_config.get('values', 'quoted')
+        assert quoted == 'all your "quotes" are belong to us'
+
+        # Writing must escape backslashes and quotes
+        w_config.set('values', 'backslash', backslash)
+        w_config.set('values', 'quote', quote)
+        w_config.write() # enforce writing
+
+        # Contents shouldn't differ
+        assert file_obj.getvalue() == orig_value

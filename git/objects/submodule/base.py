@@ -1,3 +1,8 @@
+# Copyright (C) 2010, 2011 Sebastian Thiel (byronimo@gmail.com) and contributors
+#
+# This module is part of GitDB and is released under
+# the New BSD License: http://www.opensource.org/licenses/bsd-license.php
+from git.util import RepoAliasMixin
 import util
 from util import (
 					mkhead,
@@ -13,8 +18,10 @@ from git.util import (
 						Iterable, 
 						join_path_native, 
 						to_native_path_linux,
-						RemoteProgress
+						rmtree
 					)
+
+from git.db.interface import RemoteProgress
 
 from git.config import SectionConstraint
 from git.exc import (
@@ -23,13 +30,11 @@ from git.exc import (
 					)
 
 import stat
-import git
+import git			# we use some types indirectly to prevent cyclic imports !
 
 import os
 import sys
 import time
-
-import shutil
 
 __all__ = ["Submodule", "UpdateProgress"]
 
@@ -53,7 +58,7 @@ UPDWKTREE = UpdateProgress.UPDWKTREE
 # IndexObject comes via util module, its a 'hacky' fix thanks to pythons import 
 # mechanism which cause plenty of trouble of the only reason for packages and
 # modules is refactoring - subpackages shoudn't depend on parent packages
-class Submodule(util.IndexObject, Iterable, Traversable):
+class Submodule(util.IndexObject, Iterable, Traversable, RepoAliasMixin):
 	"""Implements access to a git submodule. They are special in that their sha
 	represents a commit in the submodule's repository which is to be checked out
 	at the path of this instance. 
@@ -71,6 +76,9 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 	# this is a bogus type for base class compatability
 	type = 'submodule'
 	
+	# this type doesn't really have a type id
+	type_id = 0
+	
 	__slots__ = ('_parent_commit', '_url', '_branch_path', '_name', '__weakref__')
 	_cache_attrs = ('path', '_url', '_branch_path')
 	
@@ -80,7 +88,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 		
 		:param repo: Our parent repository
 		:param binsha: binary sha referring to a commit in the remote repository, see url parameter
-		:param parent_commit: see set_parent_commit()
+		:param parent_commit: a Commit object instance, see set_parent_commit() for more information
 		:param url: The url to the remote repository which is the submodule
 		:param branch_path: full (relative) path to ref to checkout when cloning the remote repository"""
 		super(Submodule, self).__init__(repo, binsha, mode, path)
@@ -195,7 +203,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 	#{ Edit Interface
 	
 	@classmethod
-	def add(cls, repo, name, path, url=None, branch=None, no_checkout=False):
+	def add(cls, repo, name, path, url=None, branch=None, no_checkout=False,  repoType=None):
 		"""Add a new submodule to the given repository. This will alter the index
 		as well as the .gitmodules file, but will not create a new commit.
 		If the submodule already exists, no matter if the configuration differs
@@ -220,12 +228,16 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 			Examples are 'master' or 'feature/new'
 		:param no_checkout: if True, and if the repository has to be cloned manually, 
 			no checkout will be performed
+		:param repoType: The repository type to use. It must provide the clone_from method.
+			If None, the default implementation is used.
 		:return: The newly created submodule instance
 		:note: works atomically, such that no change will be done if the repository
 			update fails for instance"""
 		if repo.bare:
 			raise InvalidGitRepositoryError("Cannot add submodules to bare repositories")
 		# END handle bare repos
+		
+		repoType = repoType or git.Repo
 		
 		path = to_native_path_linux(path)
 		if path.endswith('/'):
@@ -280,7 +292,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 			if not branch_is_default:
 				kwargs['b'] = br.name
 			# END setup checkout-branch
-			mrepo = git.Repo.clone_from(url, path, **kwargs)
+			mrepo = repoType.clone_from(url, path, **kwargs)
 		# END verify url
 		
 		# update configuration and index
@@ -306,7 +318,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 		return sm
 		
 	def update(self, recursive=False, init=True, to_latest_revision=False, progress=None, 
-				dry_run=False):
+				dry_run=False, ):
 		"""Update the repository of this submodule to point to the checkout
 		we point at with the binsha of this instance.
 		
@@ -368,7 +380,6 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 			if not init:
 				return self
 			# END early abort if init is not allowed
-			import git
 			
 			# there is no git-repository yet - but delete empty paths
 			module_path = join_path_native(self.repo.working_tree_dir, self.path)
@@ -384,7 +395,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 			# branch according to the remote-HEAD if possible
 			progress.update(BEGIN|CLONE, 0, 1, prefix+"Cloning %s to %s in submodule %r" % (self.url, module_path, self.name))
 			if not dry_run:
-				mrepo = git.Repo.clone_from(self.url, module_path, n=True)
+				mrepo = type(self.repo).clone_from(self.url, module_path, n=True)
 			#END handle dry-run
 			progress.update(END|CLONE, 0, 1, prefix+"Done cloning to %s" % module_path)
 			
@@ -622,7 +633,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 				if os.path.islink(mp):
 					method = os.remove
 				elif os.path.isdir(mp):
-					method = shutil.rmtree
+					method = rmtree
 				elif os.path.exists(mp):
 					raise AssertionError("Cannot forcibly delete repository as it was neither a link, nor a directory")
 				#END handle brutal deletion
@@ -671,7 +682,7 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 				if not dry_run:
 					wtd = mod.working_tree_dir
 					del(mod)		# release file-handles (windows)
-					shutil.rmtree(wtd)
+					rmtree(wtd)
 				# END delete tree if possible
 			# END handle force
 		# END handle module deletion
@@ -760,14 +771,19 @@ class Submodule(util.IndexObject, Iterable, Traversable):
 	#{ Query Interface
 	
 	@unbare_repo
-	def module(self):
-		""":return: Repo instance initialized from the repository at our submodule path
+	def module(self, repoType=None):
+		""":return: Repository instance initialized from the repository at our submodule path
+		:param repoType: The type of repository to be created. It must be possible to instatiate it
+			from a single repository path.
+			If None, a default repository type will be used
 		:raise InvalidGitRepositoryError: if a repository was not available. This could 
 			also mean that it was not yet initialized"""
 		# late import to workaround circular dependencies
-		module_path = self.abspath 
+		module_path = self.abspath
+		repoType = repoType or git.Repo
+		
 		try:
-			repo = git.Repo(module_path)
+			repo = repoType(module_path)
 			if repo != self.repo:
 				return repo
 			# END handle repo uninitialized

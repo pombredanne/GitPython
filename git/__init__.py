@@ -14,13 +14,15 @@ __version__ = 'git'
 #{ Initialization
 def _init_externals():
 	"""Initialize external projects by putting them into the path"""
-	sys.path.append(os.path.join(os.path.dirname(__file__), 'ext', 'gitdb'))
-	
-	try:
-		import gitdb
-	except ImportError:
-		raise ImportError("'gitdb' could not be found in your PYTHONPATH")
-	#END verify import
+	ext_base = os.path.join(os.path.dirname(__file__), 'ext') 
+	for package in ('async', 'smmap'):
+		sys.path.append(os.path.join(ext_base, package))
+		try:
+			__import__(package)
+		except ImportError:
+			raise ImportError("%r could not be found in your PYTHONPATH" % package)
+		#END verify import
+	#END handle external import 
 	
 #} END initialization
 
@@ -37,9 +39,9 @@ from git.diff import *
 from git.exc import *
 from git.db import *
 from git.cmd import Git
-from git.repo import Repo
 from git.remote import *
 from git.index import *
+from git.repo import Repo
 from git.util import (
 						LockFile, 
 						BlockingLockFile, 

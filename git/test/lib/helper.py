@@ -12,26 +12,21 @@ import tempfile
 import shutil
 import cStringIO
 
-GIT_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+import warnings
+from nose import SkipTest
+
+from base import (
+					maketemp,
+					rorepo_dir
+				)
+
 
 __all__ = (
-			'fixture_path', 'fixture', 'absolute_project_path', 'StringProcessAdapter',
-			'with_rw_repo', 'with_rw_and_rw_remote_repo', 'TestBase', 'TestCase', 'GIT_REPO'
-			)
+			'StringProcessAdapter', 'GlobalsItemDeletorMetaCls', 'InheritedTestMethodsOverrideWrapperMetaClsAutoMixin',
+			'with_rw_repo', 'with_rw_and_rw_remote_repo', 'TestBase', 'TestCase', 'needs_module_or_skip' 
+		)
 
-#{ Routines
 
-def fixture_path(name):
-	test_dir = os.path.dirname(os.path.dirname(__file__))
-	return os.path.join(test_dir, "fixtures", name)
-
-def fixture(name):
-	return open(fixture_path(name), 'rb').read()
-
-def absolute_project_path():
-	return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-#} END routines
 	
 #{ Adapters 
 	
@@ -51,13 +46,6 @@ class StringProcessAdapter(object):
 #} END adapters
 
 #{ Decorators 
-
-def _mktemp(*args):
-	"""Wrapper around default tempfile.mktemp to fix an osx issue"""
-	tdir = tempfile.mktemp(*args)
-	if sys.platform == 'darwin':
-		tdir = '/private' + tdir
-	return tdir
 
 def _rmtree_onerror(osremove, fullpath, exec_info):
 	"""
@@ -87,7 +75,7 @@ def with_rw_repo(working_tree_ref, bare=False):
 			if bare:
 				prefix = ''
 			#END handle prefix
-			repo_dir = _mktemp("%sbare_%s" % (prefix, func.__name__))
+			repo_dir = maketemp("%sbare_%s" % (prefix, func.__name__))
 			rw_repo = self.rorepo.clone(repo_dir, shared=True, bare=bare, n=True)
 			
 			rw_repo.head.commit = rw_repo.commit(working_tree_ref)
@@ -143,8 +131,8 @@ def with_rw_and_rw_remote_repo(working_tree_ref):
 	assert isinstance(working_tree_ref, basestring), "Decorator requires ref name for working tree checkout"
 	def argument_passer(func):
 		def remote_repo_creator(self):
-			remote_repo_dir = _mktemp("remote_repo_%s" % func.__name__)
-			repo_dir = _mktemp("remote_clone_non_bare_repo")
+			remote_repo_dir = maketemp("remote_repo_%s" % func.__name__)
+			repo_dir = maketemp("remote_clone_non_bare_repo")
 			
 			rw_remote_repo = self.rorepo.clone(remote_repo_dir, shared=True, bare=True)
 			rw_repo = rw_remote_repo.clone(repo_dir, shared=True, bare=False, n=True)		# recursive alternates info ?
@@ -180,9 +168,11 @@ def with_rw_and_rw_remote_repo(working_tree_ref):
 			except GitCommandError,e:
 				print str(e)
 				if os.name == 'nt':
-					raise AssertionError('git-daemon needs to run this test, but windows does not have one. Otherwise, run: git-daemon "%s"'%tempfile.gettempdir()) 
+					raise AssertionError('git-daemon needs to run this test, but windows does not have one. Otherwise, run: git-daemon "%s"' % os.path.dirname(_mktemp())) 
 				else:
-					raise AssertionError('Please start a git-daemon to run this test, execute: git-daemon "%s"'%tempfile.gettempdir())
+					raise AssertionError('Please start a git-daemon to run this test, execute: git-daemon "%s"' % os.path.dirname(_mktemp()))
+				# END make assertion
+			#END catch ls remote error
 			
 			# adjust working dir
 			prev_cwd = os.getcwd()
@@ -204,33 +194,108 @@ def with_rw_and_rw_remote_repo(working_tree_ref):
 	
 	return argument_passer
 	
+def needs_module_or_skip(module):
+	"""Decorator to be used for test cases only.
+	Print a warning if the given module could not be imported, and skip the test.
+	Otherwise run the test as usual
+	:param module: the name of the module to skip"""
+	def argpasser(func):
+		def wrapper(self, *args, **kwargs):
+			try:
+				__import__(module)
+			except ImportError:
+				msg = "Module %r is required to run this test - skipping" % module
+				warnings.warn(msg)
+				raise SkipTest(msg)
+			#END check import
+			return func(self, *args, **kwargs)
+		#END wrapper
+		wrapper.__name__ = func.__name__
+		return wrapper
+	#END argpasser
+	return argpasser
+	
 #} END decorators
+
+#{ Meta Classes
+class GlobalsItemDeletorMetaCls(type):
+	"""Utiltiy to prevent the RepoBase to be picked up by nose as the metacls
+	will delete the instance from the globals"""
+	#{ Configuration
+	# Set this to a string name of the module to delete
+	ModuleToDelete = None
+	#} END configuration
+	
+	def __new__(metacls, name, bases, clsdict):
+		assert metacls.ModuleToDelete is not None, "Invalid metaclass configuration"
+		new_type = super(GlobalsItemDeletorMetaCls, metacls).__new__(metacls, name, bases, clsdict)
+		if name != metacls.ModuleToDelete:
+			mod = __import__(new_type.__module__, globals(), locals(), new_type.__module__)
+			try:
+				delattr(mod, metacls.ModuleToDelete)
+			except AttributeError:
+				pass
+			#END skip case that people import our base without actually using it
+		#END handle deletion
+		return new_type
+	
+		
+class InheritedTestMethodsOverrideWrapperMetaClsAutoMixin(object):
+	"""Automatically picks up the actual metaclass of the the type to be created, 
+	that is the one inherited by one of the bases, and patch up its __new__ to use
+	the InheritedTestMethodsOverrideWrapperInstanceDecorator with our configured decorator"""
+	
+	#{ Configuration
+	# decorator function to use when wrapping the inherited methods. Put it into a list as first member
+	# to hide it from being created as class method
+	decorator = []
+	#}END configuration
+	
+	@classmethod
+	def _find_metacls(metacls, bases):
+		"""emulate pythons lookup"""
+		mcls_attr = '__metaclass__'
+		for base in bases:
+			if hasattr(base, mcls_attr):
+				return getattr(base, mcls_attr)
+			return metacls._find_metacls(base.__bases__)
+		#END for each base
+		raise AssertionError("base class had not metaclass attached")
+		
+	@classmethod
+	def _patch_methods_recursive(metacls, bases, clsdict):
+		"""depth-first patching of methods"""
+		for base in bases:
+			metacls._patch_methods_recursive(base.__bases__, clsdict)
+			for name, item in base.__dict__.iteritems():
+				if not name.startswith('test_'):
+					continue
+				#END skip non-tests
+				clsdict[name] = metacls.decorator[0](item)
+			#END for each item
+		#END for each base
+		
+	def __new__(metacls, name, bases, clsdict):
+		assert metacls.decorator, "'decorator' member needs to be set in subclass"
+		base_metacls = metacls._find_metacls(bases)
+		metacls._patch_methods_recursive(bases, clsdict)
+		return base_metacls.__new__(base_metacls, name, bases, clsdict)
+	
+#} END meta classes
 	
 class TestBase(TestCase):
 	"""
 	Base Class providing default functionality to all tests such as:
-	
 	- Utility functions provided by the TestCase base of the unittest method such as::
 		self.fail("todo")
 		self.failUnlessRaises(...)
-		
-	- Class level repository which is considered read-only as it is shared among 
-	  all test cases in your type.
-	  Access it using:: 
-	   self.rorepo	# 'ro' stands for read-only
-	   
-	  The rorepo is in fact your current project's git repo. If you refer to specific 
-	  shas for your objects, be sure you choose some that are part of the immutable portion 
-	  of the project history ( to assure tests don't fail for others ).
 	"""
 	
 	@classmethod
 	def setUpAll(cls):
-		"""
-		Dynamically add a read-only repository to our actual type. This way 
-		each test type has its own repository
-		"""
-		cls.rorepo = Repo(GIT_REPO)
+		"""This method is only called to provide the most basic functionality
+		Subclasses may just override it or implement it differently"""
+		cls.rorepo = Repo(rorepo_dir())
 	
 	def _make_file(self, rela_path, data, repo=None):
 		"""
